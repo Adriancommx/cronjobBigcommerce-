@@ -2,7 +2,7 @@ name: Actualización inventario Bigcommerce
 
 on:
   schedule:
-    - cron: '0 2 * * *'  # Ejecuta todos los días a las 02:00 UTC
+    - cron: '0 14 * * *'  # Ejecuta todos los días a las 02:00 UTC
   workflow_dispatch:  
 
 jobs:
