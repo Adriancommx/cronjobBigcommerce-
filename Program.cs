@@ -37,16 +37,36 @@ public class Program
 
             foreach (var productGroup in productGroups)
             {
-                var productDetail = await GetProductIdByName(productGroup.Name);
-                if (productDetail != null)
+                try
                 {
-                    await UpdateProductInventoryInBigCommerce(productDetail.ProductId, productGroup.Variants);
+                    var productDetail = await GetProductIdByName(productGroup.Name);
+
+                    if (productDetail != null)
+                    {
+                        await UpdateProductInventoryInBigCommerce(productDetail.ProductId, productGroup.Variants);
+                    }
+                    else
+                    {
+                        var variantsWithStock = productGroup.Variants.Where(v => v.inventory_level > 0).ToList();
+
+                        if (variantsWithStock.Any())
+                        {
+                            productGroup.Variants = variantsWithStock;
+                            await CreateProductWithVariantsInBigCommerce(productGroup);
+                        }
+                        else
+                        {
+                            Console.WriteLine($"Producto '{productGroup.Name}' no tiene stock. No se creará.");
+                        }
+                    }
                 }
-                else
+                catch (Exception ex)
                 {
-                    await CreateProductWithVariantsInBigCommerce(productGroup);
+                    Console.WriteLine($"Error processing product '{productGroup.Name}': {ex.Message}");
+                    continue;
                 }
             }
+
 
             Console.WriteLine("Inventory update process completed successfully.");
         }
@@ -103,7 +123,7 @@ public class Program
                 if (parts.Length < 10) continue;
 
                 int inventory = int.Parse(parts[8]);
-                if (inventory <= 0) continue; // Ignore products without stock
+                if (inventory <= 0) continue; // Ignora productos sin stock
 
                 var sku = parts[0];
                 var ean = parts[1];
@@ -113,37 +133,37 @@ public class Program
                 var gender = parts[5];
                 var color = parts[6];
                 var size = parts[7];
-                var price = Convert.ToDecimal(parts[9].Replace(",", "."), CultureInfo.InvariantCulture);
 
-                string parentKey = $"{ean}_{color}"; // Unique key based on EAN and Color
+                string cleanedPrice = parts[9].Replace(",", "");
+                decimal.TryParse(cleanedPrice, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal price);
+
+                string parentKey = $"{ean}_{color}"; 
 
                 if (!groupedProducts.ContainsKey(parentKey))
                 {
                     groupedProducts[parentKey] = new ProductGroup
                     {
-                        Name = $"{name} {color}", // Ensure unique product names
+                        Name = $"{name} {color} {ean}", // Asegura nombre único por color y ean
                         Sku = sku,
                         Price = price,
+                        mpn = ean, 
                         Variants = new List<ProductVariant>(),
                         inventory_tracking = "variant",
-                        upc = ean,
                         is_visible = false,
                     };
+
                 }
 
                 // Ensure variant SKU is unique (avoid parent SKU conflict)
-                string uniqueVariantSku = sku;
-                if (sku == groupedProducts[parentKey].Sku)
-                {
-                    uniqueVariantSku = ModifySku(sku);
-                }
+                string uniqueVariantSku = $"{ean}-{color}-{size}";
+
 
                 // Add the variant details
                 groupedProducts[parentKey].Variants.Add(new ProductVariant
                 {
                     Sku = uniqueVariantSku, // Unique SKU for variant
                     Price = price,
-                    upc = ean,
+                    mpn = ean,
                     inventory_level = inventory,
                     option_values = new List<ProductOption>
                 {
@@ -176,20 +196,20 @@ public class Program
                 sku = productGroup.Sku, 
                 inventory_tracking = "variant",
                 is_visible = false,
-                upc = productGroup.upc,
+                mpn = productGroup.mpn,
                 variants = productGroup.Variants.Select(variant => new
                 {
                     price = variant.Price,
                     weight = 0.1,
                     sku = variant.Sku,
-                    upc = variant.upc,
+                    mpn = variant.mpn,
                     inventory_level = variant.inventory_level,
                     option_values = new List<object>
                     {
                         new
                         {
                             label = variant.option_values[0].label,
-                            option_id = 0,
+                            //option_id = 0,
                             option_display_name = "Size"
                         }
                     }
@@ -203,15 +223,22 @@ public class Program
             var response = await client.PostAsync(BigCommerceApiUrl, content);
             if (!response.IsSuccessStatusCode)
             {
-                Console.WriteLine($"Error creating product: {response.StatusCode} - {await response.Content.ReadAsStringAsync()}");
+                Console.WriteLine($"Error creating product: {productGroup.Sku} | {response.StatusCode} - {await response.Content.ReadAsStringAsync()}");
                 return;
             }
 
             var responseContent = await response.Content.ReadAsStringAsync();
             dynamic productResponse = JsonConvert.DeserializeObject(responseContent);
             int productId = productResponse.data.id;
+            var productSku = productResponse.data.sku;
 
-            Console.WriteLine($"Product '{productGroup.Name}' created successfully with ID {productId}");
+            Console.WriteLine($"Product created: {productGroup.Name} (SKU: {productSku})");
+
+            if (productGroup.Variants == null || !productGroup.Variants.Any())
+            {
+                Console.WriteLine($"Producto '{productGroup.Name}' no tiene variantes con stock. Se omite.");
+                return;
+            }
         }
     }
 
@@ -297,28 +324,49 @@ public class Program
         }
     }
 
-    public async Task UpdateProductInventoryInBigCommerce(int productId, List<ProductVariant> variants)
+    public async Task UpdateProductInventoryInBigCommerce(int productId, List<ProductVariant> updatedVariants)
     {
         using (var client = new HttpClient())
         {
             client.DefaultRequestHeaders.Add("X-Auth-Token", BigCommerceToken);
 
-            foreach (var variant in variants)
+            var response = await client.GetAsync($"{BigCommerceApiUrl}/{productId}/variants");
+            if (!response.IsSuccessStatusCode)
             {
+                Console.WriteLine($"Error retrieving variants: {response.StatusCode} - {await response.Content.ReadAsStringAsync()}");
+                return;
+            }
+
+            var content = await response.Content.ReadAsStringAsync();
+            dynamic data = JsonConvert.DeserializeObject(content);
+            var existingVariants = data.data;
+
+            foreach (var existingVariant in existingVariants)
+            {
+                string sku = existingVariant.sku;
+                int variantId = existingVariant.id;
+
+                var updatedVariant = updatedVariants.FirstOrDefault(v => v.Sku == sku);
+                if (updatedVariant == null)
+                {
+                    Console.WriteLine($"SKU {sku} not found in update list.");
+                    continue;
+                }
+
                 var variantData = new
                 {
-                    inventory_level = variant.inventory_level
+                    inventory_level = updatedVariant.inventory_level
                 };
 
                 var json = JsonConvert.SerializeObject(variantData);
-                var content = new StringContent(json, Encoding.UTF8, "application/json");
+                var updateContent = new StringContent(json, Encoding.UTF8, "application/json");
 
-                var response = await client.PutAsync($"{BigCommerceApiUrl}/variants/{variant.Sku}", content);
+                var updateResponse = await client.PutAsync($"{BigCommerceApiUrl}/{productId}/variants/{variantId}", updateContent);
 
-                if (response.IsSuccessStatusCode)
-                    Console.WriteLine($" Inventory updated for SKU {variant.Sku}");
+                if (updateResponse.IsSuccessStatusCode)
+                    Console.WriteLine($"Inventory updated for SKU {sku}");
                 else
-                    Console.WriteLine($" Error updating inventory: {response.StatusCode} - {await response.Content.ReadAsStringAsync()}");
+                    Console.WriteLine($"Error updating inventory for SKU {sku}: {updateResponse.StatusCode} - {await updateResponse.Content.ReadAsStringAsync()}");
             }
         }
     }
@@ -362,7 +410,7 @@ public class Program
         public string Name { get; set; }
         public string Sku { get; set; }
         public decimal Price { get; set; }
-        public string upc { get; set; }
+        public string mpn { get; set; }
         public List<ProductVariant> Variants { get; set; }
         public string inventory_tracking { get; set; }
         
@@ -374,7 +422,7 @@ public class Program
     {
         public string Sku { get; set; }
         public decimal Price { get; set; }
-        public string upc { get; set; }
+        public string mpn { get; set; }
 
         public int inventory_level { get; set; }
         public List<ProductOption> option_values { get; set; }
