@@ -1,0 +1,35 @@
+name: Actualización inventario Bigcommerce
+
+on:
+  schedule:
+    - cron: '0 14 * * *'  # Ejecuta todos los días a las 02:00 UTC
+  workflow_dispatch:  
+
+jobs:
+  build-and-run:
+    runs-on: windows-latest  
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4  
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0'  
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build project
+        run: dotnet build --configuration Release
+
+      - name: Run application with environment variables
+        run: |
+          $env:FTP_HOST = "${{ secrets.FTP_HOST }}"
+          $env:FTP_USER = "${{ secrets.FTP_USER }}"
+          $env:FTP_PASS = "${{ secrets.FTP_PASS }}"
+          $env:BIGCOMMERCE_API_URL = "${{ secrets.BIGCOMMERCE_API_URL }}"
+          $env:BIGCOMMERCE_TOKEN = "${{ secrets.BIGCOMMERCE_TOKEN }}"
+          dotnet run --configuration Release
+        shell: pwsh
