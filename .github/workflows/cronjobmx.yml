@@ -30,6 +30,7 @@ jobs:
           $env:FTP_USER = "${{ secrets.FTP_USER }}"
           $env:FTP_PASS = "${{ secrets.FTP_PASS }}"
           $env:BIGCOMMERCE_API_URL = "${{ secrets.BIGCOMMERCE_API_URL }}"
-          $env:BIGCOMMERCE_TOKEN = "${{ secrets.BIGCOMMERCE_TOKEN }}"          
+          $env:BIGCOMMERCE_TOKEN = "${{ secrets.BIGCOMMERCE_TOKEN }}"
+          
           dotnet run --configuration Release
         shell: pwsh
