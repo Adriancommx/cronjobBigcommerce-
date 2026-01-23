@@ -30,14 +30,6 @@ jobs:
           $env:FTP_USER = "${{ secrets.FTP_USER }}"
           $env:FTP_PASS = "${{ secrets.FTP_PASS }}"
           $env:BIGCOMMERCE_API_URL = "${{ secrets.BIGCOMMERCE_API_URL }}"
-          $env:BIGCOMMERCE_TOKEN = "${{ secrets.BIGCOMMERCE_TOKEN }}"
-
-          # >>> Prueba si los secrets existen <<<
-          Write-Host "FTP_HOST está configurado: $($env:FTP_HOST -ne $null)"
-          Write-Host "FTP_USER está configurado: $($env:FTP_USER -ne $null)"
-          Write-Host "FTP_PASS está configurado: $($env:FTP_PASS -ne $null)"
-          Write-Host "BIGCOMMERCE_API_URL está configurado: $($env:BIGCOMMERCE_API_URL -ne $null)"
-          Write-Host "BIGCOMMERCE_TOKEN está configurado: $($env:BIGCOMMERCE_TOKEN -ne $null)"
-          
+          $env:BIGCOMMERCE_TOKEN = "${{ secrets.BIGCOMMERCE_TOKEN }}"          
           dotnet run --configuration Release
         shell: pwsh
