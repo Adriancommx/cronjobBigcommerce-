@@ -12,11 +12,11 @@ using System.Linq;
 
 public class Program
 {
-    private static readonly string FtpHost = Environment.GetEnvironmentVariable("FTP_HOST");
-    private static readonly string FtpUser = Environment.GetEnvironmentVariable("FTP_USER");
-    private static readonly string FtpPass = Environment.GetEnvironmentVariable("FTP_PASS");
-    private static readonly string BigCommerceApiUrl = Environment.GetEnvironmentVariable("BIGCOMMERCE_API_URL");
-    private static readonly string BigCommerceToken = Environment.GetEnvironmentVariable("BIGCOMMERCE_TOKEN");
+    private static readonly string FtpHost = Environment.GetEnvironmentVariable("FTP_HOST")!;
+    private static readonly string FtpUser = Environment.GetEnvironmentVariable("FTP_USER")!;
+    private static readonly string FtpPass = Environment.GetEnvironmentVariable("FTP_PASS")!;
+    private static readonly string BigCommerceApiUrl = Environment.GetEnvironmentVariable("BIGCOMMERCE_API_URL")!;
+    private static readonly string BigCommerceToken = Environment.GetEnvironmentVariable("BIGCOMMERCE_TOKEN")!;
     private const string FtpFilePath = "/Stock.txt";
 
     // Shared client — avoids socket exhaustion and lets us set auth once
@@ -269,7 +269,7 @@ public class Program
         }
 
         var responseContent = await response.Content.ReadAsStringAsync();
-        dynamic productResponse = JsonConvert.DeserializeObject(responseContent);
+        dynamic productResponse = JsonConvert.DeserializeObject(responseContent)!;
         int productId = productResponse.data.id;
         var productSku = productResponse.data.sku;
 
@@ -314,7 +314,7 @@ public class Program
         }
 
         var content = await response.Content.ReadAsStringAsync();
-        dynamic data = JsonConvert.DeserializeObject(content);
+        dynamic data = JsonConvert.DeserializeObject(content)!;
         var existingVariants = data.data;
 
         // Track which SKUs from the TXT were matched to an existing BC variant
@@ -438,15 +438,15 @@ public class Program
 
     public class Product
     {
-        public string Sku { get; set; }
-        public string Ean { get; set; }
-        public string Name { get; set; }
-        public string Color { get; set; }
-        public string Size { get; set; }
+        public string Sku { get; set; } = null!;
+        public string Ean { get; set; } = null!;
+        public string Name { get; set; } = null!;
+        public string Color { get; set; } = null!;
+        public string Size { get; set; } = null!;
         public int Inventory { get; set; }
         public decimal Price { get; set; }
-        public string upc { get; set; }
-        public string Type { get; set; }
+        public string upc { get; set; } = null!;
+        public string Type { get; set; } = null!;
     }
 
     public class ProductDetail
@@ -456,30 +456,30 @@ public class Program
 
     public class ProductGroup
     {
-        public string Name { get; set; }
-        public string Sku { get; set; }
+        public string Name { get; set; } = null!;
+        public string Sku { get; set; } = null!;
         public decimal Price { get; set; }
-        public string mpn { get; set; }
-        public List<ProductVariant> Variants { get; set; }
-        public string inventory_tracking { get; set; }
+        public string mpn { get; set; } = null!;
+        public List<ProductVariant> Variants { get; set; } = null!;
+        public string inventory_tracking { get; set; } = null!;
 
         public Boolean is_visible { get; set; }
     }
 
     public class ProductVariant
     {
-        public string Sku { get; set; }
+        public string Sku { get; set; } = null!;
         public decimal Price { get; set; }
-        public string mpn { get; set; }
+        public string mpn { get; set; } = null!;
 
         public int inventory_level { get; set; }
-        public List<ProductOption> option_values { get; set; }
+        public List<ProductOption> option_values { get; set; } = null!;
     }
 
     public class ProductOption
     {
-        public string label { get; set; }
+        public string label { get; set; } = null!;
         public int option_id { get; set; }
-        public string option_display_name { get; set; }
+        public string option_display_name { get; set; } = null!;
     }
 }
