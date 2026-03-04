@@ -92,7 +92,7 @@ public class Program
             {
                 try
                 {
-                    var productDetail = await GetProductIdByName(productGroup.Name);
+                    var productDetail = await GetProductIdBySku(productGroup.mpn);
 
                     if (productDetail != null)
                     {
@@ -276,16 +276,17 @@ public class Program
         Console.WriteLine($"Product created: {productGroup.Name} (SKU: {productSku})");
     }
 
-    public async Task<ProductDetail?> GetProductIdByName(string name)
+    // Search by parent SKU (EAN) — more reliable than name since BC names may differ
+    public async Task<ProductDetail?> GetProductIdBySku(string sku)
     {
         try
         {
-            string url = $"{BigCommerceApiUrl}?name={WebUtility.UrlEncode(name)}&limit=1";
+            string url = $"{BigCommerceApiUrl}?sku={WebUtility.UrlEncode(sku)}&limit=1";
             var response = await GetAsync(url);
 
             if (!response.IsSuccessStatusCode)
             {
-                Console.WriteLine($"Error searching product: {response.StatusCode} - {await response.Content.ReadAsStringAsync()}");
+                Console.WriteLine($"Error searching product by SKU: {response.StatusCode} - {await response.Content.ReadAsStringAsync()}");
                 return null;
             }
 
@@ -299,7 +300,7 @@ public class Program
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Unexpected error getting product ID: {ex.Message}");
+            Console.WriteLine($"Unexpected error getting product ID by SKU: {ex.Message}");
             return null;
         }
     }
@@ -317,21 +318,27 @@ public class Program
         dynamic data = JsonConvert.DeserializeObject(content)!;
         var existingVariants = data.data;
 
-        // Track which SKUs from the TXT were matched to an existing BC variant
-        var matchedSkus = new HashSet<string>();
+        // Track which size labels from the TXT were matched to an existing BC variant
+        var matchedSizeLabels = new HashSet<string>();
 
-        // Fix #1: update existing BC variants — set to 0 if absent from TXT
+        // Update existing BC variants — match by size label, set to 0 if not in TXT
         foreach (var existingVariant in existingVariants)
         {
             string sku = existingVariant.sku;
             int variantId = existingVariant.id;
+            string sizeLabel = existingVariant.option_values?.Count > 0
+                ? (string)existingVariant.option_values[0].label
+                : string.Empty;
 
-            var updatedVariant = updatedVariants.FirstOrDefault(v => v.Sku == sku);
+            // Match by size label (option_values[0].label) — SKU formats may differ between systems
+            var updatedVariant = updatedVariants.FirstOrDefault(v =>
+                v.option_values?.Count > 0 &&
+                v.option_values[0].label == sizeLabel);
 
             if (updatedVariant != null)
-                matchedSkus.Add(sku);
+                matchedSizeLabels.Add(sizeLabel);
 
-            // If the variant is not in the TXT at all, default to 0
+            // If no match by size label, variant is not in TXT — set to 0
             int newInventory = updatedVariant?.inventory_level ?? 0;
 
             var variantData = new { inventory_level = newInventory };
@@ -345,9 +352,11 @@ public class Program
                 Console.WriteLine($"Error updating inventory for SKU {sku}: {updateResponse.StatusCode} - {await updateResponse.Content.ReadAsStringAsync()}");
         }
 
-        // Fix #2: create variants from the TXT that don't exist in BC yet
+        // Create variants from the TXT whose size label doesn't exist in BC yet
         var newVariants = updatedVariants
-            .Where(v => !matchedSkus.Contains(v.Sku) && v.inventory_level > 0)
+            .Where(v => v.option_values?.Count > 0 &&
+                        !matchedSizeLabels.Contains(v.option_values[0].label) &&
+                        v.inventory_level > 0)
             .ToList();
 
         foreach (var newVariant in newVariants)
