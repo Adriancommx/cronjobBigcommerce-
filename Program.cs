@@ -169,7 +169,7 @@ public class Program
 
         try
         {
-            foreach (var line in File.ReadAllLines(filePath))
+            foreach (var line in File.ReadAllLines(filePath, Encoding.Latin1))
             {
                 var parts = line.Split('|');
                 if (parts.Length < 10) continue;
