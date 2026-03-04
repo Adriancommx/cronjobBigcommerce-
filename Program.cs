@@ -1,4 +1,4 @@
-﻿using FluentFTP;
+using FluentFTP;
 using System;
 using System.IO;
 using System.Net.Http;
@@ -12,7 +12,6 @@ using System.Linq;
 
 public class Program
 {
-
     private static readonly string FtpHost = Environment.GetEnvironmentVariable("FTP_HOST");
     private static readonly string FtpUser = Environment.GetEnvironmentVariable("FTP_USER");
     private static readonly string FtpPass = Environment.GetEnvironmentVariable("FTP_PASS");
@@ -20,11 +19,65 @@ public class Program
     private static readonly string BigCommerceToken = Environment.GetEnvironmentVariable("BIGCOMMERCE_TOKEN");
     private const string FtpFilePath = "/Stock.txt";
 
+    // Shared client — avoids socket exhaustion and lets us set auth once
+    private static readonly HttpClient _http = new HttpClient();
+
     static async Task Main()
     {
+        _http.DefaultRequestHeaders.Add("X-Auth-Token", BigCommerceToken);
         var program = new Program();
         await program.RunUpdateAsync();
     }
+
+    // ─── Rate-limiting helper ────────────────────────────────────────────────
+
+    // Retries the request on HTTP 429, respecting the Retry-After header.
+    private static async Task<HttpResponseMessage> SendWithRetryAsync(
+        Func<HttpRequestMessage> buildRequest, int maxRetries = 3)
+    {
+        for (int attempt = 0; attempt <= maxRetries; attempt++)
+        {
+            var response = await _http.SendAsync(buildRequest());
+
+            if ((int)response.StatusCode != 429)
+                return response;
+
+            if (attempt == maxRetries)
+            {
+                Console.WriteLine("Rate limit exceeded after max retries.");
+                return response;
+            }
+
+            int waitSeconds = 10;
+            if (response.Headers.TryGetValues("Retry-After", out var values) &&
+                int.TryParse(values.FirstOrDefault(), out int retryAfter))
+            {
+                waitSeconds = retryAfter;
+            }
+
+            Console.WriteLine($"Rate limited (429). Waiting {waitSeconds}s before retry {attempt + 1}/{maxRetries}...");
+            await Task.Delay(waitSeconds * 1000);
+        }
+
+        throw new Exception("Unreachable");
+    }
+
+    private static Task<HttpResponseMessage> GetAsync(string url) =>
+        SendWithRetryAsync(() => new HttpRequestMessage(HttpMethod.Get, url));
+
+    private static Task<HttpResponseMessage> PostAsync(string url, string json) =>
+        SendWithRetryAsync(() => new HttpRequestMessage(HttpMethod.Post, url)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        });
+
+    private static Task<HttpResponseMessage> PutAsync(string url, string json) =>
+        SendWithRetryAsync(() => new HttpRequestMessage(HttpMethod.Put, url)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        });
+
+    // ─── Main flow ───────────────────────────────────────────────────────────
 
     public async Task RunUpdateAsync()
     {
@@ -66,7 +119,6 @@ public class Program
                     continue;
                 }
             }
-
 
             Console.WriteLine("Inventory update process completed successfully.");
         }
@@ -122,8 +174,8 @@ public class Program
                 var parts = line.Split('|');
                 if (parts.Length < 10) continue;
 
-                int inventory = int.Parse(parts[8]);
-                if (inventory <= 0) continue; // Ignora productos sin stock
+                // Fix #1: include lines with inventory = 0 so we can zero them out in BC
+                if (!int.TryParse(parts[8], out int inventory)) continue;
 
                 var sku = parts[0];
                 var ean = parts[1];
@@ -137,38 +189,34 @@ public class Program
                 string cleanedPrice = parts[9].Replace(",", "");
                 decimal.TryParse(cleanedPrice, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal price);
 
-                string parentKey = $"{ean}_{color}"; 
+                string parentKey = $"{ean}_{color}";
 
                 if (!groupedProducts.ContainsKey(parentKey))
                 {
                     groupedProducts[parentKey] = new ProductGroup
                     {
-                        Name = $"{name} {color} {ean}", // Asegura nombre único por color y ean
+                        Name = $"{name} {color} {ean}",
                         Sku = sku,
                         Price = price,
-                        mpn = ean, 
+                        mpn = ean,
                         Variants = new List<ProductVariant>(),
                         inventory_tracking = "variant",
                         is_visible = false,
                     };
-
                 }
 
-                // Ensure variant SKU is unique (avoid parent SKU conflict)
                 string uniqueVariantSku = $"{ean}-{color}-{size}";
 
-
-                // Add the variant details
                 groupedProducts[parentKey].Variants.Add(new ProductVariant
                 {
-                    Sku = uniqueVariantSku, // Unique SKU for variant
+                    Sku = uniqueVariantSku,
                     Price = price,
                     mpn = ean,
                     inventory_level = inventory,
                     option_values = new List<ProductOption>
-                {
-                    new ProductOption { label = size, option_id = 0, option_display_name = "Size" }
-                }
+                    {
+                        new ProductOption { label = size, option_id = 0, option_display_name = "Size" }
+                    }
                 });
             }
         }
@@ -183,139 +231,71 @@ public class Program
 
     public async Task CreateProductWithVariantsInBigCommerce(ProductGroup productGroup)
     {
-        using (var client = new HttpClient())
+        var productData = new
         {
-            client.DefaultRequestHeaders.Add("X-Auth-Token", BigCommerceToken);
-
-            var productData = new
+            name = productGroup.Name,
+            type = "physical",
+            price = productGroup.Price,
+            weight = 0,
+            sku = productGroup.Sku,
+            inventory_tracking = "variant",
+            is_visible = false,
+            mpn = productGroup.mpn,
+            variants = productGroup.Variants.Select(variant => new
             {
-                name = productGroup.Name,
-                type = "physical",
-                price = productGroup.Price,
-                weight = 0,
-                sku = productGroup.Sku, 
-                inventory_tracking = "variant",
-                is_visible = false,
-                mpn = productGroup.mpn,
-                variants = productGroup.Variants.Select(variant => new
+                price = variant.Price,
+                weight = 0.1,
+                sku = variant.Sku,
+                mpn = variant.mpn,
+                inventory_level = variant.inventory_level,
+                option_values = new List<object>
                 {
-                    price = variant.Price,
-                    weight = 0.1,
-                    sku = variant.Sku,
-                    mpn = variant.mpn,
-                    inventory_level = variant.inventory_level,
-                    option_values = new List<object>
+                    new
                     {
-                        new
-                        {
-                            label = variant.option_values[0].label,
-                            //option_id = 0,
-                            option_display_name = "Size"
-                        }
+                        label = variant.option_values[0].label,
+                        option_display_name = "Size"
                     }
-                }).ToList()
-            };
+                }
+            }).ToList()
+        };
 
+        var json = JsonConvert.SerializeObject(productData, Formatting.Indented);
+        var response = await PostAsync(BigCommerceApiUrl, json);
 
-            var json = JsonConvert.SerializeObject(productData, Formatting.Indented);
-            var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-            var response = await client.PostAsync(BigCommerceApiUrl, content);
-            if (!response.IsSuccessStatusCode)
-            {
-                Console.WriteLine($"Error creating product: {productGroup.Sku} | {response.StatusCode} - {await response.Content.ReadAsStringAsync()}");
-                return;
-            }
-
-            var responseContent = await response.Content.ReadAsStringAsync();
-            dynamic productResponse = JsonConvert.DeserializeObject(responseContent);
-            int productId = productResponse.data.id;
-            var productSku = productResponse.data.sku;
-
-            Console.WriteLine($"Product created: {productGroup.Name} (SKU: {productSku})");
-
-            if (productGroup.Variants == null || !productGroup.Variants.Any())
-            {
-                Console.WriteLine($"Producto '{productGroup.Name}' no tiene variantes con stock. Se omite.");
-                return;
-            }
-        }
-    }
-
-    //Helpers 
-    
-    //Generates a random SKU by appending a unique number
-    private string GenerateRandomSku()
-    {
-        Random random = new Random();
-        return random.Next(1000, 9999).ToString();
-    }
-
-
-    public async Task CreateVariantsInBigCommerce(int productId, List<Product> variants)
-    {
-        using (var client = new HttpClient())
+        if (!response.IsSuccessStatusCode)
         {
-            client.DefaultRequestHeaders.Add("X-Auth-Token", BigCommerceToken);
-
-            foreach (var variant in variants)
-            {
-                var variantData = new
-                {
-                    product_id = productId,
-                    sku = variant.Sku,
-                    price = variant.Price,
-                    weight = 0.1,
-                    inventory_level = variant.Inventory,
-                    option_values = new[]
-                    {
-                        new
-                        {
-                            label = variant.Size,
-                            option_display_name = "Size"
-                        }
-                    }
-                };
-
-                var json = JsonConvert.SerializeObject(variantData);
-                var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-                var response = await client.PostAsync($"{BigCommerceApiUrl}/{productId}/variants", content);
-                if (response.IsSuccessStatusCode)
-                    Console.WriteLine($"Variant {variant.Size} created for {productId}");
-                else
-                    Console.WriteLine($"Error creating variant: {response.StatusCode} - {await response.Content.ReadAsStringAsync()}");
-            }
+            Console.WriteLine($"Error creating product: {productGroup.Sku} | {response.StatusCode} - {await response.Content.ReadAsStringAsync()}");
+            return;
         }
+
+        var responseContent = await response.Content.ReadAsStringAsync();
+        dynamic productResponse = JsonConvert.DeserializeObject(responseContent);
+        int productId = productResponse.data.id;
+        var productSku = productResponse.data.sku;
+
+        Console.WriteLine($"Product created: {productGroup.Name} (SKU: {productSku})");
     }
 
     public async Task<ProductDetail?> GetProductIdByName(string name)
     {
         try
         {
-            using (var client = new HttpClient())
+            string url = $"{BigCommerceApiUrl}?name={WebUtility.UrlEncode(name)}&limit=1";
+            var response = await GetAsync(url);
+
+            if (!response.IsSuccessStatusCode)
             {
-                client.DefaultRequestHeaders.Add("X-Auth-Token", BigCommerceToken);
-
-                string url = $"{BigCommerceApiUrl}?name={WebUtility.UrlEncode(name)}&limit=1";
-                var response = await client.GetAsync(url);
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    Console.WriteLine($"Error searching product: {response.StatusCode} - {await response.Content.ReadAsStringAsync()}");
-                    return null;
-                }
-
-                var responseContent = await response.Content.ReadAsStringAsync();
-                var data = JsonConvert.DeserializeObject<dynamic>(responseContent);
-
-                if (data?.data == null || data?.data.Count == 0)
-                {
-                    return null;
-                }
-
-                return new ProductDetail { ProductId = (int)data?.data[0].id };
+                Console.WriteLine($"Error searching product: {response.StatusCode} - {await response.Content.ReadAsStringAsync()}");
+                return null;
             }
+
+            var responseContent = await response.Content.ReadAsStringAsync();
+            var data = JsonConvert.DeserializeObject<dynamic>(responseContent);
+
+            if (data?.data == null || data?.data.Count == 0)
+                return null;
+
+            return new ProductDetail { ProductId = (int)data?.data[0].id };
         }
         catch (Exception ex)
         {
@@ -326,48 +306,117 @@ public class Program
 
     public async Task UpdateProductInventoryInBigCommerce(int productId, List<ProductVariant> updatedVariants)
     {
-        using (var client = new HttpClient())
+        var response = await GetAsync($"{BigCommerceApiUrl}/{productId}/variants");
+        if (!response.IsSuccessStatusCode)
         {
-            client.DefaultRequestHeaders.Add("X-Auth-Token", BigCommerceToken);
+            Console.WriteLine($"Error retrieving variants: {response.StatusCode} - {await response.Content.ReadAsStringAsync()}");
+            return;
+        }
 
-            var response = await client.GetAsync($"{BigCommerceApiUrl}/{productId}/variants");
-            if (!response.IsSuccessStatusCode)
+        var content = await response.Content.ReadAsStringAsync();
+        dynamic data = JsonConvert.DeserializeObject(content);
+        var existingVariants = data.data;
+
+        // Track which SKUs from the TXT were matched to an existing BC variant
+        var matchedSkus = new HashSet<string>();
+
+        // Fix #1: update existing BC variants — set to 0 if absent from TXT
+        foreach (var existingVariant in existingVariants)
+        {
+            string sku = existingVariant.sku;
+            int variantId = existingVariant.id;
+
+            var updatedVariant = updatedVariants.FirstOrDefault(v => v.Sku == sku);
+
+            if (updatedVariant != null)
+                matchedSkus.Add(sku);
+
+            // If the variant is not in the TXT at all, default to 0
+            int newInventory = updatedVariant?.inventory_level ?? 0;
+
+            var variantData = new { inventory_level = newInventory };
+            var updateResponse = await PutAsync(
+                $"{BigCommerceApiUrl}/{productId}/variants/{variantId}",
+                JsonConvert.SerializeObject(variantData));
+
+            if (updateResponse.IsSuccessStatusCode)
+                Console.WriteLine($"Inventory updated for SKU {sku}: {newInventory}");
+            else
+                Console.WriteLine($"Error updating inventory for SKU {sku}: {updateResponse.StatusCode} - {await updateResponse.Content.ReadAsStringAsync()}");
+        }
+
+        // Fix #2: create variants from the TXT that don't exist in BC yet
+        var newVariants = updatedVariants
+            .Where(v => !matchedSkus.Contains(v.Sku) && v.inventory_level > 0)
+            .ToList();
+
+        foreach (var newVariant in newVariants)
+        {
+            var variantData = new
             {
-                Console.WriteLine($"Error retrieving variants: {response.StatusCode} - {await response.Content.ReadAsStringAsync()}");
-                return;
-            }
-
-            var content = await response.Content.ReadAsStringAsync();
-            dynamic data = JsonConvert.DeserializeObject(content);
-            var existingVariants = data.data;
-
-            foreach (var existingVariant in existingVariants)
-            {
-                string sku = existingVariant.sku;
-                int variantId = existingVariant.id;
-
-                var updatedVariant = updatedVariants.FirstOrDefault(v => v.Sku == sku);
-                if (updatedVariant == null)
+                sku = newVariant.Sku,
+                price = newVariant.Price,
+                weight = 0.1,
+                mpn = newVariant.mpn,
+                inventory_level = newVariant.inventory_level,
+                option_values = new List<object>
                 {
-                    Console.WriteLine($"SKU {sku} not found in update list.");
-                    continue;
+                    new
+                    {
+                        label = newVariant.option_values[0].label,
+                        option_display_name = "Size"
+                    }
                 }
+            };
 
-                var variantData = new
+            var createResponse = await PostAsync(
+                $"{BigCommerceApiUrl}/{productId}/variants",
+                JsonConvert.SerializeObject(variantData));
+
+            if (createResponse.IsSuccessStatusCode)
+                Console.WriteLine($"New variant created for product {productId}: SKU {newVariant.Sku}");
+            else
+                Console.WriteLine($"Error creating variant SKU {newVariant.Sku}: {createResponse.StatusCode} - {await createResponse.Content.ReadAsStringAsync()}");
+        }
+    }
+
+    //Helpers
+
+    //Generates a random SKU by appending a unique number
+    private string GenerateRandomSku()
+    {
+        Random random = new Random();
+        return random.Next(1000, 9999).ToString();
+    }
+
+    public async Task CreateVariantsInBigCommerce(int productId, List<Product> variants)
+    {
+        foreach (var variant in variants)
+        {
+            var variantData = new
+            {
+                product_id = productId,
+                sku = variant.Sku,
+                price = variant.Price,
+                weight = 0.1,
+                inventory_level = variant.Inventory,
+                option_values = new[]
                 {
-                    inventory_level = updatedVariant.inventory_level
-                };
+                    new
+                    {
+                        label = variant.Size,
+                        option_display_name = "Size"
+                    }
+                }
+            };
 
-                var json = JsonConvert.SerializeObject(variantData);
-                var updateContent = new StringContent(json, Encoding.UTF8, "application/json");
+            var json = JsonConvert.SerializeObject(variantData);
+            var response = await PostAsync($"{BigCommerceApiUrl}/{productId}/variants", json);
 
-                var updateResponse = await client.PutAsync($"{BigCommerceApiUrl}/{productId}/variants/{variantId}", updateContent);
-
-                if (updateResponse.IsSuccessStatusCode)
-                    Console.WriteLine($"Inventory updated for SKU {sku}");
-                else
-                    Console.WriteLine($"Error updating inventory for SKU {sku}: {updateResponse.StatusCode} - {await updateResponse.Content.ReadAsStringAsync()}");
-            }
+            if (response.IsSuccessStatusCode)
+                Console.WriteLine($"Variant {variant.Size} created for {productId}");
+            else
+                Console.WriteLine($"Error creating variant: {response.StatusCode} - {await response.Content.ReadAsStringAsync()}");
         }
     }
 
@@ -413,9 +462,8 @@ public class Program
         public string mpn { get; set; }
         public List<ProductVariant> Variants { get; set; }
         public string inventory_tracking { get; set; }
-        
-        public Boolean is_visible { get; set; }
 
+        public Boolean is_visible { get; set; }
     }
 
     public class ProductVariant
@@ -434,6 +482,4 @@ public class Program
         public int option_id { get; set; }
         public string option_display_name { get; set; }
     }
-
-
 }
