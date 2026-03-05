@@ -102,17 +102,7 @@ public class Program
                     }
                     else
                     {
-                        var variantsWithStock = productGroup.Variants.Where(v => v.inventory_level > 0).ToList();
-
-                        if (variantsWithStock.Any())
-                        {
-                            productGroup.Variants = variantsWithStock;
-                            await CreateProductWithVariantsInBigCommerce(productGroup);
-                        }
-                        else
-                        {
-                            Console.WriteLine($"Producto '{productGroup.Name}' no tiene stock. No se creará.");
-                        }
+                        await CreateProductWithVariantsInBigCommerce(productGroup);
                     }
                 }
                 catch (Exception ex)
