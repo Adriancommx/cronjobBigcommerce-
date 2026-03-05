@@ -17,6 +17,8 @@ public class Program
     private static readonly string FtpPass = Environment.GetEnvironmentVariable("FTP_PASS")!;
     private static readonly string BigCommerceApiUrl = Environment.GetEnvironmentVariable("BIGCOMMERCE_API_URL")!;
     private static readonly string BigCommerceToken = Environment.GetEnvironmentVariable("BIGCOMMERCE_TOKEN")!;
+    // Batch variant endpoint: same base but /variants instead of /products
+    private static readonly string BigCommerceVariantsUrl = Environment.GetEnvironmentVariable("BIGCOMMERCE_API_URL")!.Replace("/products", "/variants");
     private const string FtpFilePath = "/Stock.txt";
 
     // Shared client — avoids socket exhaustion and lets us set auth once
@@ -172,6 +174,12 @@ public class Program
                 var sku = parts[0];
                 var ean = parts[1];
                 var name = parts[2];
+
+                if (string.IsNullOrWhiteSpace(ean))
+                {
+                    Console.WriteLine($"WARNING: EAN vacío en línea con SKU '{sku}', nombre '{name}'. Se omite.");
+                    continue;
+                }
                 var brand = parts[3];
                 var category = parts[4];
                 var gender = parts[5];
@@ -340,17 +348,16 @@ public class Program
 
         // Track which size labels from the TXT were matched to an existing BC variant
         var matchedSizeLabels = new HashSet<string>();
+        var batchUpdates = new List<object>();
 
-        // Update existing BC variants — match by size label, set to 0 if not in TXT
+        // Build batch update list — match by size label, set to 0 if not in TXT
         foreach (var existingVariant in existingVariants)
         {
-            string sku = existingVariant.sku;
             int variantId = existingVariant.id;
             string sizeLabel = existingVariant.option_values?.Count > 0
                 ? (string)existingVariant.option_values[0].label
                 : string.Empty;
 
-            // Match by size label (option_values[0].label) — SKU formats may differ between systems
             var updatedVariant = updatedVariants.FirstOrDefault(v =>
                 v.option_values?.Count > 0 &&
                 v.option_values[0].label == sizeLabel);
@@ -358,18 +365,18 @@ public class Program
             if (updatedVariant != null)
                 matchedSizeLabels.Add(sizeLabel);
 
-            // If no match by size label, variant is not in TXT — set to 0
             int newInventory = updatedVariant?.inventory_level ?? 0;
+            batchUpdates.Add(new { id = variantId, inventory_level = newInventory });
+        }
 
-            var variantData = new { inventory_level = newInventory };
-            var updateResponse = await PutAsync(
-                $"{BigCommerceApiUrl}/{productId}/variants/{variantId}",
-                JsonConvert.SerializeObject(variantData));
-
-            if (updateResponse.IsSuccessStatusCode)
-                Console.WriteLine($"Inventory updated for SKU {sku}: {newInventory}");
+        // Single batch PUT instead of one PUT per variant
+        if (batchUpdates.Any())
+        {
+            var batchResponse = await PutAsync(BigCommerceVariantsUrl, JsonConvert.SerializeObject(batchUpdates));
+            if (batchResponse.IsSuccessStatusCode)
+                Console.WriteLine($"Batch inventory updated for product {productId}: {batchUpdates.Count} variants");
             else
-                Console.WriteLine($"Error updating inventory for SKU {sku}: {updateResponse.StatusCode} - {await updateResponse.Content.ReadAsStringAsync()}");
+                Console.WriteLine($"Error in batch update for product {productId}: {batchResponse.StatusCode} - {await batchResponse.Content.ReadAsStringAsync()}");
         }
 
         // Create variants from the TXT whose size label doesn't exist in BC yet
