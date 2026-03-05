@@ -92,7 +92,7 @@ public class Program
             {
                 try
                 {
-                    var productDetail = await GetProductIdBySku(productGroup.mpn);
+                    var productDetail = await GetProductIdBySku(productGroup.Sku);
 
                     if (productDetail != null)
                     {
