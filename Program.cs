@@ -92,7 +92,9 @@ public class Program
             {
                 try
                 {
-                    var productDetail = await GetProductIdBySku(productGroup.Sku);
+                    // Try by SKU first (barcode), then by name as fallback for products created with a different barcode
+                    var productDetail = await GetProductIdBySku(productGroup.Sku)
+                                     ?? await GetProductIdByName(productGroup.Name);
 
                     if (productDetail != null)
                     {
@@ -301,6 +303,34 @@ public class Program
         catch (Exception ex)
         {
             Console.WriteLine($"Unexpected error getting product ID by SKU: {ex.Message}");
+            return null;
+        }
+    }
+
+    public async Task<ProductDetail?> GetProductIdByName(string name)
+    {
+        try
+        {
+            string url = $"{BigCommerceApiUrl}?name={WebUtility.UrlEncode(name)}&limit=1";
+            var response = await GetAsync(url);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"Error searching product by name: {response.StatusCode} - {await response.Content.ReadAsStringAsync()}");
+                return null;
+            }
+
+            var responseContent = await response.Content.ReadAsStringAsync();
+            var data = JsonConvert.DeserializeObject<dynamic>(responseContent);
+
+            if (data?.data == null || data?.data.Count == 0)
+                return null;
+
+            return new ProductDetail { ProductId = (int)data?.data[0].id };
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Unexpected error getting product ID by name: {ex.Message}");
             return null;
         }
     }
