@@ -19,8 +19,7 @@ public class Program
     private static readonly string BigCommerceToken = Environment.GetEnvironmentVariable("BIGCOMMERCE_TOKEN")!;
     // Batch variant endpoint: same base but /variants instead of /products
     private static readonly string BigCommerceVariantsUrl = Environment.GetEnvironmentVariable("BIGCOMMERCE_API_URL")!.Replace("/products", "/variants");
-    private const string FtpFilePath   = "/Stock.txt";
-    private const string FtpMappingPath = "/mapping.json";
+    private const string FtpFilePath = "/Stock.txt";
 
     // Shared client — avoids socket exhaustion and lets us set auth once
     private static readonly HttpClient _http = new HttpClient();
@@ -80,30 +79,26 @@ public class Program
             Content = new StringContent(json, Encoding.UTF8, "application/json")
         });
 
-    // ─── Mapping FTP helpers ─────────────────────────────────────────────────
+    // ─── Mapping helpers (archivo en el repo, pasado via MAPPING_FILE env var) ──
+
+    // Ruta del mapping.json: variable de entorno en CI, fallback local para desarrollo
+    private static readonly string MappingFilePath =
+        Environment.GetEnvironmentVariable("MAPPING_FILE")
+        ?? Path.Combine(AppContext.BaseDirectory, "mapping.json");
 
     private Dictionary<string, int> LoadMapping()
     {
-        string localPath = Path.Combine(Path.GetTempPath(), "mapping.json");
         try
         {
-            using var ftp = new FtpClient(FtpHost, new NetworkCredential(FtpUser, FtpPass));
-            ftp.Config.EncryptionMode = FtpEncryptionMode.None;
-            ftp.Config.ValidateAnyCertificate = true;
-            ftp.Connect();
-
-            if (ftp.FileExists(FtpMappingPath))
+            if (File.Exists(MappingFilePath))
             {
-                ftp.DownloadFile(localPath, FtpMappingPath);
-                ftp.Disconnect();
-                var json = File.ReadAllText(localPath, Encoding.UTF8);
-                var mapping = JsonConvert.DeserializeObject<Dictionary<string, int>>(json) ?? new Dictionary<string, int>();
+                var json = File.ReadAllText(MappingFilePath, Encoding.UTF8);
+                var mapping = JsonConvert.DeserializeObject<Dictionary<string, int>>(json)
+                              ?? new Dictionary<string, int>();
                 Console.WriteLine($"Mapping loaded: {mapping.Count} productos conocidos.");
                 return mapping;
             }
-
-            ftp.Disconnect();
-            Console.WriteLine("No mapping file found on FTP. Starting fresh.");
+            Console.WriteLine("No mapping file found. Starting fresh.");
         }
         catch (Exception ex)
         {
@@ -114,22 +109,14 @@ public class Program
 
     private void SaveMapping(Dictionary<string, int> mapping)
     {
-        string localPath = Path.Combine(Path.GetTempPath(), "mapping.json");
         try
         {
-            File.WriteAllText(localPath, JsonConvert.SerializeObject(mapping, Formatting.Indented), Encoding.UTF8);
-
-            using var ftp = new FtpClient(FtpHost, new NetworkCredential(FtpUser, FtpPass));
-            ftp.Config.EncryptionMode = FtpEncryptionMode.None;
-            ftp.Config.ValidateAnyCertificate = true;
-            ftp.Connect();
-            ftp.UploadFile(localPath, FtpMappingPath, FtpRemoteExists.Overwrite);
-            ftp.Disconnect();
-            Console.WriteLine($"Mapping saved to FTP: {mapping.Count} entries.");
+            File.WriteAllText(MappingFilePath, JsonConvert.SerializeObject(mapping, Formatting.Indented), Encoding.UTF8);
+            Console.WriteLine($"Mapping saved: {mapping.Count} entries → {MappingFilePath}");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Warning: Could not save mapping to FTP: {ex.Message}");
+            Console.WriteLine($"Warning: Could not save mapping: {ex.Message}");
         }
     }
 
@@ -200,16 +187,19 @@ public class Program
         }
     }
 
-    public string DownloadFileFromFTP()
+    public string DownloadFileFromFTP(int maxRetries = 3)
     {
         string localPath = Path.Combine(Path.GetTempPath(), "stock.txt");
 
-        try
+        for (int attempt = 1; attempt <= maxRetries; attempt++)
         {
-            using (var ftpClient = new FtpClient(FtpHost, new NetworkCredential(FtpUser, FtpPass)))
+            try
             {
+                using var ftpClient = new FtpClient(FtpHost, new NetworkCredential(FtpUser, FtpPass));
                 ftpClient.Config.EncryptionMode = FtpEncryptionMode.None;
                 ftpClient.Config.ValidateAnyCertificate = true;
+                ftpClient.Config.ConnectTimeout = 30000;
+                ftpClient.Config.DataConnectionConnectTimeout = 30000;
 
                 ftpClient.Connect();
                 Console.WriteLine("FTP connection established");
@@ -225,13 +215,20 @@ public class Program
                 }
 
                 ftpClient.Disconnect();
+                return localPath;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"FTP attempt {attempt}/{maxRetries} failed: {ex.Message}");
+                if (attempt < maxRetries)
+                {
+                    Console.WriteLine("Retrying in 15s...");
+                    System.Threading.Thread.Sleep(15000);
+                }
             }
         }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error: {ex.Message}");
-        }
 
+        Console.WriteLine("ERROR: Could not download Stock.txt after all retries.");
         return localPath;
     }
 

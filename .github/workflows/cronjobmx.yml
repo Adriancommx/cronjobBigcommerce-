@@ -3,20 +3,20 @@ name: Actualización inventario Bigcommerce
 on:
   schedule:
     - cron: '0 14 * * *'  # Ejecuta todos los días a las 02:00 UTC
-  workflow_dispatch:  
+  workflow_dispatch:
 
 jobs:
   build-and-run:
-    runs-on: windows-latest  
+    runs-on: windows-latest
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4  
+        uses: actions/checkout@v4
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0'  
+          dotnet-version: '8.0'
 
       - name: Restore dependencies
         run: dotnet restore
@@ -31,5 +31,15 @@ jobs:
           $env:FTP_PASS = "${{ secrets.FTP_PASS }}"
           $env:BIGCOMMERCE_API_URL = "${{ secrets.BIGCOMMERCE_API_URL }}"
           $env:BIGCOMMERCE_TOKEN = "${{ secrets.BIGCOMMERCE_TOKEN }}"
+          $env:MAPPING_FILE = "${{ github.workspace }}\mapping.json"
           dotnet run --configuration Release
+        shell: pwsh
+
+      - name: Commit mapping if updated
+        run: |
+          git config user.email "github-actions@github.com"
+          git config user.name "GitHub Actions"
+          git add mapping.json
+          git diff --staged --quiet || git commit -m "chore: update product mapping [skip ci]"
+          git push
         shell: pwsh
