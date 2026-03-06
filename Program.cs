@@ -133,6 +133,12 @@ public class Program
 
             Console.WriteLine("Starting inventory update process...");
 
+            // Acumular variantes por BC product ID antes de actualizar.
+            // Si dos grupos del TXT (ej. TOMOÑO y TOMONO) apuntan al mismo BC product,
+            // sus inventarios se suman por talla en lugar de sobreescribirse.
+            var pendingUpdates = new Dictionary<int, List<ProductVariant>>();
+            var pendingCreate  = new List<ProductGroup>();
+
             foreach (var productGroup in productGroups)
             {
                 try
@@ -155,14 +161,58 @@ public class Program
 
                     if (resolvedId.HasValue)
                     {
-                        await UpdateProductInventoryInBigCommerce(resolvedId.Value, productGroup.Variants);
+                        // Acumular variantes: si el mismo BC product ID aparece de otro grupo, sumar
+                        if (!pendingUpdates.ContainsKey(resolvedId.Value))
+                            pendingUpdates[resolvedId.Value] = new List<ProductVariant>();
+
+                        foreach (var variant in productGroup.Variants)
+                        {
+                            var existing = pendingUpdates[resolvedId.Value]
+                                .FirstOrDefault(v => v.option_values[0].label == variant.option_values[0].label);
+                            if (existing != null)
+                                existing.inventory_level += variant.inventory_level;
+                            else
+                                pendingUpdates[resolvedId.Value].Add(variant);
+                        }
+
+                        // Guardar en mapping si no estaba
+                        if (!mapping.ContainsKey(productGroup.MappingKey))
+                        {
+                            mapping[productGroup.MappingKey] = resolvedId.Value;
+                            newMappings++;
+                        }
                     }
                     else
                     {
-                        resolvedId = await CreateProductWithVariantsInBigCommerce(productGroup);
+                        pendingCreate.Add(productGroup);
                     }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error processing product '{productGroup.Name}': {ex.Message}");
+                    continue;
+                }
+            }
 
-                    // Guardar en mapping si no estaba (producto recién encontrado o creado)
+            // Ejecutar actualizaciones (una por BC product ID)
+            foreach (var (productId, variants) in pendingUpdates)
+            {
+                try
+                {
+                    await UpdateProductInventoryInBigCommerce(productId, variants);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error updating product {productId}: {ex.Message}");
+                }
+            }
+
+            // Crear productos que no existen en BC
+            foreach (var productGroup in pendingCreate)
+            {
+                try
+                {
+                    var resolvedId = await CreateProductWithVariantsInBigCommerce(productGroup);
                     if (resolvedId.HasValue && !mapping.ContainsKey(productGroup.MappingKey))
                     {
                         mapping[productGroup.MappingKey] = resolvedId.Value;
@@ -171,8 +221,7 @@ public class Program
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"Error processing product '{productGroup.Name}': {ex.Message}");
-                    continue;
+                    Console.WriteLine($"Error creating product '{productGroup.Name}': {ex.Message}");
                 }
             }
 
