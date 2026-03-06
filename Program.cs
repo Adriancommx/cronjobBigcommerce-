@@ -170,25 +170,25 @@ public class Program
 
                 // Fix #1: include lines with inventory = 0 so we can zero them out in BC
                 if (!int.TryParse(parts[8], out int inventory)) continue;
+                if (inventory < 0) inventory = 0; // POS puede generar negativos, tratar como 0
 
-                var sku = parts[0];
-                var ean = parts[1];
-                var name = parts[2];
+                // Normalizar: strip '+' del barcode, EAN a mayúsculas
+                var sku  = parts[0].TrimStart('+');
+                var ean  = parts[1].Trim().ToUpper();
+                var name = parts[2].Trim();
 
                 if (string.IsNullOrWhiteSpace(ean))
                 {
                     Console.WriteLine($"WARNING: EAN vacío en línea con SKU '{sku}', nombre '{name}'. Se omite.");
                     continue;
                 }
-                var brand = parts[3];
-                var category = parts[4];
-                var gender = parts[5];
-                var color = parts[6];
-                var size = parts[7];
+                var color = parts[6].Trim();
+                var size  = parts[7].Trim();
 
                 string cleanedPrice = parts[9].Replace(",", "");
                 decimal.TryParse(cleanedPrice, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal price);
 
+                // Clave normalizada: EAN en mayúsculas + color (evita duplicados por capitalización)
                 string parentKey = $"{ean}_{color}";
 
                 if (!groupedProducts.ContainsKey(parentKey))
@@ -207,17 +207,28 @@ public class Program
 
                 string uniqueVariantSku = $"{ean}-{color}-{size}";
 
-                groupedProducts[parentKey].Variants.Add(new ProductVariant
+                // Si la talla ya existe en el grupo, sumar inventarios (el POS puede enviar la misma talla en múltiples líneas)
+                var existingVariant = groupedProducts[parentKey].Variants
+                    .FirstOrDefault(v => v.option_values[0].label == size);
+
+                if (existingVariant != null)
                 {
-                    Sku = uniqueVariantSku,
-                    Price = price,
-                    mpn = ean,
-                    inventory_level = inventory,
-                    option_values = new List<ProductOption>
+                    existingVariant.inventory_level += inventory;
+                }
+                else
+                {
+                    groupedProducts[parentKey].Variants.Add(new ProductVariant
                     {
-                        new ProductOption { label = size, option_id = 0, option_display_name = "Size" }
-                    }
-                });
+                        Sku = uniqueVariantSku,
+                        Price = price,
+                        mpn = ean,
+                        inventory_level = inventory,
+                        option_values = new List<ProductOption>
+                        {
+                            new ProductOption { label = size, option_id = 0, option_display_name = "Size" }
+                        }
+                    });
+                }
             }
         }
         catch (Exception ex)
