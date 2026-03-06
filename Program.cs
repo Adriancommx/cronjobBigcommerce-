@@ -19,7 +19,8 @@ public class Program
     private static readonly string BigCommerceToken = Environment.GetEnvironmentVariable("BIGCOMMERCE_TOKEN")!;
     // Batch variant endpoint: same base but /variants instead of /products
     private static readonly string BigCommerceVariantsUrl = Environment.GetEnvironmentVariable("BIGCOMMERCE_API_URL")!.Replace("/products", "/variants");
-    private const string FtpFilePath = "/Stock.txt";
+    private const string FtpFilePath   = "/Stock.txt";
+    private const string FtpMappingPath = "/mapping.json";
 
     // Shared client — avoids socket exhaustion and lets us set auth once
     private static readonly HttpClient _http = new HttpClient();
@@ -79,6 +80,59 @@ public class Program
             Content = new StringContent(json, Encoding.UTF8, "application/json")
         });
 
+    // ─── Mapping FTP helpers ─────────────────────────────────────────────────
+
+    private Dictionary<string, int> LoadMapping()
+    {
+        string localPath = Path.Combine(Path.GetTempPath(), "mapping.json");
+        try
+        {
+            using var ftp = new FtpClient(FtpHost, new NetworkCredential(FtpUser, FtpPass));
+            ftp.Config.EncryptionMode = FtpEncryptionMode.None;
+            ftp.Config.ValidateAnyCertificate = true;
+            ftp.Connect();
+
+            if (ftp.FileExists(FtpMappingPath))
+            {
+                ftp.DownloadFile(localPath, FtpMappingPath);
+                ftp.Disconnect();
+                var json = File.ReadAllText(localPath, Encoding.UTF8);
+                var mapping = JsonConvert.DeserializeObject<Dictionary<string, int>>(json) ?? new Dictionary<string, int>();
+                Console.WriteLine($"Mapping loaded: {mapping.Count} productos conocidos.");
+                return mapping;
+            }
+
+            ftp.Disconnect();
+            Console.WriteLine("No mapping file found on FTP. Starting fresh.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Warning: Could not load mapping: {ex.Message}. Starting fresh.");
+        }
+        return new Dictionary<string, int>();
+    }
+
+    private void SaveMapping(Dictionary<string, int> mapping)
+    {
+        string localPath = Path.Combine(Path.GetTempPath(), "mapping.json");
+        try
+        {
+            File.WriteAllText(localPath, JsonConvert.SerializeObject(mapping, Formatting.Indented), Encoding.UTF8);
+
+            using var ftp = new FtpClient(FtpHost, new NetworkCredential(FtpUser, FtpPass));
+            ftp.Config.EncryptionMode = FtpEncryptionMode.None;
+            ftp.Config.ValidateAnyCertificate = true;
+            ftp.Connect();
+            ftp.UploadFile(localPath, FtpMappingPath, FtpRemoteExists.Overwrite);
+            ftp.Disconnect();
+            Console.WriteLine($"Mapping saved to FTP: {mapping.Count} entries.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Warning: Could not save mapping to FTP: {ex.Message}");
+        }
+    }
+
     // ─── Main flow ───────────────────────────────────────────────────────────
 
     public async Task RunUpdateAsync()
@@ -87,6 +141,8 @@ public class Program
         {
             string filePath = DownloadFileFromFTP();
             var productGroups = ReadProductsFromTxt(filePath);
+            var mapping = LoadMapping();
+            int newMappings = 0;
 
             Console.WriteLine("Starting inventory update process...");
 
@@ -94,17 +150,36 @@ public class Program
             {
                 try
                 {
-                    // Try by SKU first (barcode), then by name as fallback for products created with a different barcode
-                    var productDetail = await GetProductIdBySku(productGroup.Sku)
-                                     ?? await GetProductIdByName(productGroup.Name);
+                    int? resolvedId = null;
 
-                    if (productDetail != null)
+                    // 1. Mapping (lookup permanente por EAN+color → BC Product ID)
+                    if (mapping.TryGetValue(productGroup.MappingKey, out int mappedId))
                     {
-                        await UpdateProductInventoryInBigCommerce(productDetail.ProductId, productGroup.Variants);
+                        resolvedId = mappedId;
                     }
                     else
                     {
-                        await CreateProductWithVariantsInBigCommerce(productGroup);
+                        // 2. Fallback: buscar en BC por SKU y luego por nombre
+                        var productDetail = await GetProductIdBySku(productGroup.Sku)
+                                         ?? await GetProductIdByName(productGroup.Name);
+                        if (productDetail != null)
+                            resolvedId = productDetail.ProductId;
+                    }
+
+                    if (resolvedId.HasValue)
+                    {
+                        await UpdateProductInventoryInBigCommerce(resolvedId.Value, productGroup.Variants);
+                    }
+                    else
+                    {
+                        resolvedId = await CreateProductWithVariantsInBigCommerce(productGroup);
+                    }
+
+                    // Guardar en mapping si no estaba (producto recién encontrado o creado)
+                    if (resolvedId.HasValue && !mapping.ContainsKey(productGroup.MappingKey))
+                    {
+                        mapping[productGroup.MappingKey] = resolvedId.Value;
+                        newMappings++;
                     }
                 }
                 catch (Exception ex)
@@ -113,6 +188,9 @@ public class Program
                     continue;
                 }
             }
+
+            if (newMappings > 0)
+                SaveMapping(mapping);
 
             Console.WriteLine("Inventory update process completed successfully.");
         }
@@ -195,6 +273,7 @@ public class Program
                 {
                     groupedProducts[parentKey] = new ProductGroup
                     {
+                        MappingKey = parentKey,
                         Name = $"{name} {color} {ean}",
                         Sku = sku,
                         Price = price,
@@ -240,7 +319,7 @@ public class Program
         return groupedProducts.Values.ToList();
     }
 
-    public async Task CreateProductWithVariantsInBigCommerce(ProductGroup productGroup)
+    public async Task<int?> CreateProductWithVariantsInBigCommerce(ProductGroup productGroup)
     {
         var productData = new
         {
@@ -276,7 +355,7 @@ public class Program
         if (!response.IsSuccessStatusCode)
         {
             Console.WriteLine($"Error creating product: {productGroup.Sku} | {response.StatusCode} - {await response.Content.ReadAsStringAsync()}");
-            return;
+            return null;
         }
 
         var responseContent = await response.Content.ReadAsStringAsync();
@@ -284,7 +363,8 @@ public class Program
         int productId = productResponse.data.id;
         var productSku = productResponse.data.sku;
 
-        Console.WriteLine($"Product created: {productGroup.Name} (SKU: {productSku})");
+        Console.WriteLine($"Product created: {productGroup.Name} (ID: {productId}, SKU: {productSku})");
+        return productId;
     }
 
     // Search by parent SKU (EAN) — more reliable than name since BC names may differ
@@ -503,13 +583,13 @@ public class Program
 
     public class ProductGroup
     {
+        public string MappingKey { get; set; } = null!; // "{EAN}_{color}" — clave permanente de asociación
         public string Name { get; set; } = null!;
         public string Sku { get; set; } = null!;
         public decimal Price { get; set; }
         public string mpn { get; set; } = null!;
         public List<ProductVariant> Variants { get; set; } = null!;
         public string inventory_tracking { get; set; } = null!;
-
         public Boolean is_visible { get; set; }
     }
 
