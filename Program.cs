@@ -523,33 +523,93 @@ public class Program
                         v.inventory_level > 0)
             .ToList();
 
-        foreach (var newVariant in newVariants)
+        if (newVariants.Any())
         {
-            var variantData = new
+            // Step 1: Get the Size option_id for this product
+            var optionsResponse = await GetAsync($"{BigCommerceApiUrl}/{productId}/options");
+            if (!optionsResponse.IsSuccessStatusCode)
             {
-                sku = newVariant.Sku,
-                price = newVariant.Price,
-                weight = 0.1,
-                mpn = newVariant.mpn,
-                inventory_level = newVariant.inventory_level,
-                option_values = new List<object>
+                Console.WriteLine($"Error fetching options for product {productId}: {optionsResponse.StatusCode}");
+                return;
+            }
+
+            dynamic optionsData = JsonConvert.DeserializeObject(await optionsResponse.Content.ReadAsStringAsync())!;
+            int? sizeOptionId = null;
+            foreach (var opt in optionsData.data)
+            {
+                if (((string)opt.display_name).Equals("Size", StringComparison.OrdinalIgnoreCase))
                 {
-                    new
-                    {
-                        label = newVariant.option_values[0].label,
-                        option_display_name = "Size"
-                    }
+                    sizeOptionId = (int)opt.id;
+                    break;
                 }
-            };
+            }
 
-            var createResponse = await PostAsync(
-                $"{BigCommerceApiUrl}/{productId}/variants",
-                JsonConvert.SerializeObject(variantData));
+            if (!sizeOptionId.HasValue)
+            {
+                Console.WriteLine($"No Size option found for product {productId}, skipping new variants.");
+                return;
+            }
 
-            if (createResponse.IsSuccessStatusCode)
-                Console.WriteLine($"New variant created for product {productId}: SKU {newVariant.Sku}");
-            else
-                Console.WriteLine($"Error creating variant SKU {newVariant.Sku}: {createResponse.StatusCode} - {await createResponse.Content.ReadAsStringAsync()}");
+            // Step 2: Get existing option values to avoid duplicate creation
+            var valuesResponse = await GetAsync($"{BigCommerceApiUrl}/{productId}/options/{sizeOptionId}/values");
+            var existingValueIds = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            if (valuesResponse.IsSuccessStatusCode)
+            {
+                dynamic valuesData = JsonConvert.DeserializeObject(await valuesResponse.Content.ReadAsStringAsync())!;
+                foreach (var val in valuesData.data)
+                    existingValueIds[(string)val.label] = (int)val.id;
+            }
+
+            foreach (var newVariant in newVariants)
+            {
+                string sizeLabel = newVariant.option_values[0].label;
+
+                // Step 3: Get or create the option value to obtain value_id
+                int valueId;
+                if (existingValueIds.TryGetValue(sizeLabel, out int existingId))
+                {
+                    valueId = existingId;
+                }
+                else
+                {
+                    var createValueResponse = await PostAsync(
+                        $"{BigCommerceApiUrl}/{productId}/options/{sizeOptionId}/values",
+                        JsonConvert.SerializeObject(new { label = sizeLabel, sort_order = 0 }));
+
+                    if (!createValueResponse.IsSuccessStatusCode)
+                    {
+                        Console.WriteLine($"Error creating option value '{sizeLabel}' for product {productId}: {createValueResponse.StatusCode} - {await createValueResponse.Content.ReadAsStringAsync()}");
+                        continue;
+                    }
+
+                    dynamic createValueData = JsonConvert.DeserializeObject(await createValueResponse.Content.ReadAsStringAsync())!;
+                    valueId = (int)createValueData.data.id;
+                    existingValueIds[sizeLabel] = valueId;
+                }
+
+                // Step 4: Create the variant with the correct option_values payload
+                var variantData = new
+                {
+                    sku = newVariant.Sku,
+                    price = newVariant.Price,
+                    weight = 0.1,
+                    mpn = newVariant.mpn,
+                    inventory_level = newVariant.inventory_level,
+                    option_values = new List<object>
+                    {
+                        new { id = valueId, option_id = sizeOptionId.Value }
+                    }
+                };
+
+                var createResponse = await PostAsync(
+                    $"{BigCommerceApiUrl}/{productId}/variants",
+                    JsonConvert.SerializeObject(variantData));
+
+                if (createResponse.IsSuccessStatusCode)
+                    Console.WriteLine($"New variant created for product {productId}: SKU {newVariant.Sku}");
+                else
+                    Console.WriteLine($"Error creating variant SKU {newVariant.Sku}: {createResponse.StatusCode} - {await createResponse.Content.ReadAsStringAsync()}");
+            }
         }
     }
 
