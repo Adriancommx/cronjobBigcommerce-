@@ -574,7 +574,7 @@ public class Program
                 {
                     var createValueResponse = await PostAsync(
                         $"{BigCommerceApiUrl}/{productId}/options/{sizeOptionId}/values",
-                        JsonConvert.SerializeObject(new { label = sizeLabel, sort_order = 0 }));
+                        JsonConvert.SerializeObject(new { label = sizeLabel, sort_order = GetSizeSortOrder(sizeLabel) }));
 
                     if (!createValueResponse.IsSuccessStatusCode)
                     {
@@ -611,6 +611,30 @@ public class Program
                     Console.WriteLine($"Error creating variant SKU {newVariant.Sku}: {createResponse.StatusCode} - {await createResponse.Content.ReadAsStringAsync()}");
             }
         }
+    }
+
+    // Converts a size label to a numeric sort_order so variants appear in sequence.
+    // Numeric sizes (22, 22.5, 23…) → value × 10  (22→220, 22.5→225)
+    // Clothing sizes (XS/S/M/L/XL…) → fixed positions
+    private static int GetSizeSortOrder(string label)
+    {
+        if (float.TryParse(label,
+            System.Globalization.NumberStyles.Any,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out float num))
+            return (int)(num * 10);
+
+        return label.Trim().ToUpper() switch
+        {
+            "XS"   => 10,
+            "S"    => 20,
+            "M"    => 30,
+            "L"    => 40,
+            "XL"   => 50,
+            "XXL"  => 60,
+            "XXXL" => 70,
+            _      => 999
+        };
     }
 
     //Helpers
